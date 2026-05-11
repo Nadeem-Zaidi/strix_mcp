@@ -2,11 +2,6 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 import { randomUUID } from "crypto";
 import { Chunk, QDConfig } from "../types.js";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-
-
-// ─── QDrant_Db ────────────────────────────────────────────────────────────────
 
 export class QDrant_Db {
     private config: QDConfig;
@@ -21,7 +16,6 @@ export class QDrant_Db {
         this.client = new QdrantClient({ url: config.url });
     }
 
-    // ── Collection ────────────────────────────────────────────────────────────
 
     async ensureCollection(): Promise<void> {
         const result = await this.client.collectionExists(this.config.collectionname);
@@ -33,7 +27,6 @@ export class QDrant_Db {
         }
     }
 
-    // ── Single upsert (raw) ───────────────────────────────────────────────────
 
     async upsert(id: string, vector: number[], payload: Record<string, any>): Promise<void> {
         await this.client.upsert(this.config.collectionname, {
@@ -42,7 +35,6 @@ export class QDrant_Db {
         });
     }
 
-    // ── Single chunk upsert ───────────────────────────────────────────────────
 
     async upsertChunk(vector: number[], chunk: Chunk, id: string = randomUUID()): Promise<void> {
         await this.client.upsert(this.config.collectionname, {
@@ -50,8 +42,6 @@ export class QDrant_Db {
             points: [{ id, vector, payload: this.chunkToPayload(chunk) }],
         });
     }
-
-    // ── Batch chunk upsert ────────────────────────────────────────────────────
 
     async upsertManyChunks(
         items: Array<{ vector: number[]; chunk: Chunk; id?: string }>
@@ -69,8 +59,6 @@ export class QDrant_Db {
         }
     }
 
-    // ── Raw batch upsert ──────────────────────────────────────────────────────
-
     async upsertMany(
         ids: string[],
         vectors: number[][],
@@ -86,8 +74,6 @@ export class QDrant_Db {
             await this.client.upsert(this.config.collectionname, { wait: true, points: batch });
         }
     }
-
-    // ── Search ────────────────────────────────────────────────────────────────
 
     async search(vector: number[], limit: number = 10, withPayload: boolean = true): Promise<string> {
         const results = await this.client.query(this.config.collectionname, {
@@ -128,21 +114,18 @@ export class QDrant_Db {
             .join("\n\n---\n\n");
     }
 
-    // ── Delete ────────────────────────────────────────────────────────────────
-
     async delete(ids: string[]): Promise<void> {
         if (ids.length === 0) return;
         await this.client.delete(this.config.collectionname, { wait: true, points: ids });
         console.log(`[QDrant_Db] deleted ${ids.length} point(s)`);
     }
 
-    // ── Private: Chunk → Qdrant payload ──────────────────────────────────────
 
     private chunkToPayload(chunk: Chunk): Record<string, any> {
         return {
             heading:    chunk.heading,
             level:      chunk.level,
-            text:       chunk.content,       // "content" in Chunk → "text" in payload
+            text:       chunk.content, 
             sourceFile: chunk.sourceFile,
             codeBlocks: chunk.codeBlocks,
             tables:     chunk.tables,

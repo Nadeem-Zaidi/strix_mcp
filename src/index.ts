@@ -13,13 +13,12 @@ const CONFIG = {
     docsDir:        "./src/documents",
     qdrantUrl:      "http://localhost:6333",
     collectionName: "my_wiki",
-    vectorSize:     1536,   // text-embedding-3-small
-    batchSize:      20,     // chunks per OpenAI + Qdrant call
-    workers:        4,      // parallel file readers
+    vectorSize:     1536,
+    batchSize:      20,     
+    workers:        4,      
 };
 
-// ─── Stable ID ────────────────────────────────────────────────────────────────
-// deterministic ID from file + heading — re-running ingest updates, not duplicates
+
 
 function stableId(sourceFile: string, heading: string, level: number): string {
     const raw  = `${sourceFile}::${heading}::${level}`;
@@ -62,18 +61,12 @@ async function ingest(): Promise<void> {
 
     async function flush() {
         if (buffer.length === 0) return;
-
-        // 1 OpenAI call for the whole buffer
         const vectors = await embedder.embedBatch(buffer);
-
-        // build items for Qdrant
         const items = buffer.map((chunk, i) => ({
             id:     stableId(chunk.sourceFile, chunk.heading, chunk.level),
             vector: vectors[i],
             chunk,
         }));
-
-        // upsert to Qdrant (auto-batches internally at 100)
         await db.upsertManyChunks(items);
 
         totalBatches++;
@@ -82,7 +75,7 @@ async function ingest(): Promise<void> {
             `${buffer.length} chunks (running total: ${totalChunks})`
         );
 
-        buffer.length = 0; // clear in place
+        buffer.length = 0;
     }
 
     for await (const chunk of reader.readAll()) {
@@ -94,7 +87,7 @@ async function ingest(): Promise<void> {
         }
     }
 
-    await flush(); // flush remaining chunks
+    await flush();
 
     console.log(`\n✓ ingestion complete`);
     console.log(`  total chunks  : ${totalChunks}`);
@@ -116,8 +109,6 @@ async function search(query: string): Promise<void> {
         collectionname: CONFIG.collectionName,
         size:           CONFIG.vectorSize,
     });
-
-    // embed the query using the same model
    
 }
 

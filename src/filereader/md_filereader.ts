@@ -5,11 +5,6 @@ import fs from "fs/promises";
 import path from "path";
 import { Chunk } from "../types.js";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-
-
-// ─── LocalMdReader ────────────────────────────────────────────────────────────
 
 export class LocalMdReader {
     private readonly dirPath: string;
@@ -20,7 +15,6 @@ export class LocalMdReader {
         this.workerCount = workerCount;
     }
 
-    // ── Public entry point ───────────────────────────────────────────────────
 
     async *readAll(): AsyncGenerator<Chunk> {
         const mdFiles = await this.collectFiles();
@@ -35,7 +29,6 @@ export class LocalMdReader {
         yield* this.streamChunks(mdFiles);
     }
 
-    // ── File collection ──────────────────────────────────────────────────────
 
     private async collectFiles(): Promise<string[]> {
         const entries = await fs.readdir(this.dirPath, { withFileTypes: true });
@@ -44,15 +37,12 @@ export class LocalMdReader {
             .map(e => path.join(this.dirPath, e.name));
     }
 
-    // ── Producer / consumer stream ───────────────────────────────────────────
 
     private async *streamChunks(mdFiles: string[]): AsyncGenerator<Chunk> {
         const fileQueue = [...mdFiles];
         const chunkQueue: Chunk[] = [];
         let done = false;
         let notify: (() => void) | null = null;
-
-        // wake() clears notify BEFORE calling it — prevents double-fire
         const wake = () => {
             const n = notify;
             notify = null;
@@ -64,7 +54,6 @@ export class LocalMdReader {
             wake();
         };
 
-        // workers run concurrently, each popping files until queue is exhausted
         const workersPromise = Promise.all(
             Array.from({ length: this.workerCount }, () => this.worker(fileQueue, push))
         ).then(() => {
@@ -72,7 +61,6 @@ export class LocalMdReader {
             wake();
         });
 
-        // consumer: yield chunks as they arrive from any worker
         while (!done || chunkQueue.length > 0) {
             if (chunkQueue.length > 0) {
                 yield chunkQueue.shift()!;
@@ -83,8 +71,6 @@ export class LocalMdReader {
 
         await workersPromise;
     }
-
-    // ── Worker: reads one file at a time ─────────────────────────────────────
 
     private async worker(
         fileQueue: string[],
@@ -111,12 +97,9 @@ export class LocalMdReader {
 
             } catch (err) {
                 console.error(`[worker] failed on "${filePath}":`, err);
-                // swallow per-file errors so other files still process
             }
         }
     }
-
-    // ── Chunk generator (no intermediate array) ───────────────────────────────
 
     private *buildChunks(tree: any, sourceFile: string): Generator<Chunk> {
         let current: Chunk = this.emptyChunk(sourceFile);
@@ -194,8 +177,6 @@ export class LocalMdReader {
         const last = this.flush(current);
         if (last) yield last;
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private emptyChunk(sourceFile: string): Chunk {
         return { heading: "", level: 0, content: "", codeBlocks: [], tables: [], sourceFile };

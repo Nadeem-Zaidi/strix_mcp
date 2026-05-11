@@ -203,7 +203,6 @@ server.registerTool(
     },
     async ({ docsDir }) => {
         try {
-            // lazy import to keep server startup fast
             const { randomUUID }    = await import("crypto");
 
             const reader   = new LocalMdReader(docsDir, 4);
@@ -215,8 +214,6 @@ server.registerTool(
             const BATCH_SIZE = 20;
             const buffer: any[] = [];
             let totalChunks = 0;
-
-            // stable deterministic ID — re-running ingest updates, not duplicates
             const stableId = (sourceFile: string, heading: string, level: number) => {
                 const raw  = `${sourceFile}::${heading}::${level}`;
                 let hash   = 5381;
