@@ -7,6 +7,14 @@ import { DatabaseManager } from "./database/database_manager.js";
 import { Embedder } from "./embedder/embedder.js";
 import { QDrant_Db } from "./vector_db/qd.js";
 import { LocalMdReader } from "./filereader/md_filereader.js";
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = dirname(__filename);
+
+dotenv.config({ path: resolve(__dirname, "../../.env") }); // dist/src/ → root
 
 // ── DB singleton ──────────────────────────────────────────────────────────────
 let dbInstance: IDatabaseAdapter | null = null;
@@ -36,7 +44,6 @@ const getDb = async (): Promise<IDatabaseAdapter> => {
     return dbInstance;
 };
 
-// ── Qdrant + Embedder singletons ──────────────────────────────────────────────
 let qdrantInstance: QDrant_Db | null = null;
 let embedderInstance: Embedder | null = null;
 
@@ -64,7 +71,6 @@ const server = new McpServer({
     version: "1.0.0",
 });
 
-// ── Tool 1: Calculator ────────────────────────────────────────────────────────
 server.tool(
     "calculate",
     { expression: z.string().describe("Math expression, e.g. '2 + 2 * 10'") },
@@ -141,7 +147,7 @@ server.registerTool(
 
 // ── Tool 5: Semantic search over wiki (Qdrant) ────────────────────────────────
 server.registerTool(
-    "search_wiki",
+    "knowledge_base",
     {
         description: `Use this tool to search the internal knowledge base (wiki) using semantic search.
 Call this when the user asks about:
@@ -205,7 +211,7 @@ server.registerTool(
         try {
             const { randomUUID }    = await import("crypto");
 
-            const reader   = new LocalMdReader(docsDir, 4);
+            const reader   = new LocalMdReader(docsDir);
             const embedder = getEmbedder();
             const qdrant   = getQdrant();
 

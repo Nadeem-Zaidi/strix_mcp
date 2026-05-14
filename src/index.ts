@@ -1,4 +1,4 @@
-import path              from "path";
+import path from "path";
 import { LocalMdReader } from "./filereader/md_filereader.js";
 import { Embedder } from "./embedder/embedder.js";
 import { QDrant_Db } from "./vector_db/qd.js";
@@ -9,20 +9,20 @@ dotenv.config();
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-    openaiKey:      process.env.OPENAI_API_KEY ?? "",
-    docsDir:        "./src/documents",
-    qdrantUrl:      "http://localhost:6333",
-    collectionName: "my_wiki",
-    vectorSize:     1536,
-    batchSize:      20,     
-    workers:        4,      
+    openaiKey: process.env.OPENAI_API_KEY ?? "",
+    docsDir: "./src/documents",
+    qdrantUrl: "http://localhost:6333",
+    collectionName: "knowledge_base",
+    vectorSize: 1536,
+    batchSize: 20,
+    workers: 4,
 };
 
 
 
 function stableId(sourceFile: string, heading: string, level: number): string {
-    const raw  = `${sourceFile}::${heading}::${level}`;
-    let hash   = 5381;
+    const raw = `${sourceFile}::${heading}::${level}`;
+    let hash = 5381;
     for (let i = 0; i < raw.length; i++) {
         hash = ((hash << 5) + hash) ^ raw.charCodeAt(i);
         hash = hash >>> 0;
@@ -31,7 +31,6 @@ function stableId(sourceFile: string, heading: string, level: number): string {
 }
 
 // ─── Ingest ───────────────────────────────────────────────────────────────────
-
 async function ingest(): Promise<void> {
     if (!CONFIG.openaiKey) {
         throw new Error("OPENAI_API_KEY environment variable is not set");
@@ -44,18 +43,18 @@ async function ingest(): Promise<void> {
     console.log("─────────────────────────────────────────────────\n");
 
     // ── init ──────────────────────────────────────────────────────────────────
-    const reader   = new LocalMdReader(CONFIG.docsDir, CONFIG.workers);
+    const reader = new LocalMdReader(CONFIG.docsDir);
     const embedder = new Embedder(CONFIG.openaiKey);
-    const db       = new QDrant_Db({
-        url:            CONFIG.qdrantUrl,
+    const db = new QDrant_Db({
+        url: CONFIG.qdrantUrl,
         collectionname: CONFIG.collectionName,
-        size:           CONFIG.vectorSize,
+        size: CONFIG.vectorSize,
     });
 
     await db.ensureCollection();
 
     // ── stream → batch → embed → upsert ──────────────────────────────────────
-    let totalChunks  = 0;
+    let totalChunks = 0;
     let totalBatches = 0;
     const buffer: Awaited<ReturnType<typeof reader.readAll> extends AsyncGenerator<infer T> ? Promise<T[]> : never> extends never ? any[] : any[] = [];
 
@@ -63,7 +62,7 @@ async function ingest(): Promise<void> {
         if (buffer.length === 0) return;
         const vectors = await embedder.embedBatch(buffer);
         const items = buffer.map((chunk, i) => ({
-            id:     stableId(chunk.sourceFile, chunk.heading, chunk.level),
+            id: stableId(chunk.sourceFile, chunk.heading, chunk.level),
             vector: vectors[i],
             chunk,
         }));
@@ -94,29 +93,17 @@ async function ingest(): Promise<void> {
     console.log(`  total batches : ${totalBatches}`);
 }
 
+
+
 // ─── Search ───────────────────────────────────────────────────────────────────
 
-async function search(query: string): Promise<void> {
-    if (!CONFIG.openaiKey) {
-        throw new Error("OPENAI_API_KEY environment variable is not set");
-    }
 
-    console.log(`\n── Searching: "${query}"\n`);
-
-    const embedder = new Embedder(CONFIG.openaiKey);
-    const db       = new QDrant_Db({
-        url:            CONFIG.qdrantUrl,
-        collectionname: CONFIG.collectionName,
-        size:           CONFIG.vectorSize,
-    });
-   
-}
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
     const command = process.argv[2];
-    const arg     = process.argv[3];
+    const arg = process.argv[3];
 
     switch (command) {
         case "ingest":
@@ -124,10 +111,10 @@ async function main(): Promise<void> {
             await ingest();
             break;
 
-        case "search":
-            if (!arg) throw new Error("Usage: npm run dev search \"your query\"");
-            await search(arg);
-            break;
+        // case "search":
+        //     if (!arg) throw new Error("Usage: npm run dev search \"your query\"");
+        //     await search(arg);
+        //     break;
 
         default:
             await ingest();
@@ -136,5 +123,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
     console.error("[fatal]", err);
-    process.exit(1);
+    // process.exit(1);
 });

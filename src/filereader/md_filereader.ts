@@ -5,18 +5,122 @@ import fs from "fs/promises";
 import path from "path";
 import { Chunk } from "../types.js";
 
+export interface ReadError {
+    filePath: string;
+    error: unknown;
+}
+
+export type ProgressCallback = (done: number, total: number) => void;
+
+export interface LocalMdReaderOptions {
+    workerCount?: number;
+    queueMaxSize?: number;
+    readTimeoutMs?: number;
+    onProgress?: ProgressCallback;
+    signal?: AbortSignal;
+}
+
+
+class AsyncQueue<T> {
+    private readonly items: T[] = [];
+    private readonly consumerWaiters: Array<() => void> = [];
+    private readonly producerWaiters: Array<() => void> = [];
+
+    private _closed = false;
+
+    constructor(private readonly maxSize: number = 500) {}
+
+    get size(): number {
+        return this.items.length;
+    }
+
+    get closed(): boolean {
+        return this._closed;
+    }
+
+
+    async enqueue(item: T): Promise<void> {
+        while (this.items.length >= this.maxSize) {
+            if (this._closed) return;
+            await new Promise<void>(resolve =>
+                this.producerWaiters.push(resolve)
+            );
+        }
+        if (this._closed) return;
+        this.items.push(item);
+        this.consumerWaiters.shift()?.();
+    }
+
+    async dequeue(): Promise<T | null> {
+        while (true) {
+            if (this.items.length > 0) {
+                const item = this.items.shift()!;
+                this.producerWaiters.shift()?.();
+                return item;
+            }
+            if (this._closed) return null;
+            await new Promise<void>(resolve =>
+                this.consumerWaiters.push(resolve)
+            );
+        }
+    }
+    close(): void {
+        this._closed = true;
+        for (const w of this.consumerWaiters.splice(0)) w();
+        for (const w of this.producerWaiters.splice(0)) w();
+    }
+}
+class FileQueue {
+    private readonly paths: string[];
+    private _dispatched = 0;
+
+    constructor(paths: string[]) {
+        this.paths = [...paths];
+    }
+
+    next(): string | undefined {
+        const p = this.paths.shift();
+        if (p !== undefined) this._dispatched++;
+        return p;
+    }
+
+    get total(): number {
+        return this._dispatched + this.paths.length;
+    }
+
+    get remaining(): number {
+        return this.paths.length;
+    }
+}
 
 export class LocalMdReader {
     private readonly dirPath: string;
     private readonly workerCount: number;
+    private readonly queueMaxSize: number;
+    private readonly readTimeoutMs: number;
+    private readonly onProgress?: ProgressCallback;
+    private readonly signal?: AbortSignal;
+    private _errors: ReadError[] = [];
 
-    constructor(dirPath: string, workerCount: number = 4) {
-        this.dirPath = dirPath;
-        this.workerCount = workerCount;
+    constructor(dirPath: string, options: LocalMdReaderOptions = {}) {
+        this.dirPath      = dirPath;
+        this.workerCount  = options.workerCount  ?? 4;
+        this.queueMaxSize = options.queueMaxSize  ?? 500;
+        this.readTimeoutMs = options.readTimeoutMs ?? 10_000;
+        this.onProgress   = options.onProgress;
+        this.signal       = options.signal;
     }
 
-
+    get errors(): ReadError[] {
+        return [...this._errors];
+    }
     async *readAll(): AsyncGenerator<Chunk> {
+        this._errors = [];
+
+        if (this.signal?.aborted) {
+            throw new Error("AbortSignal already aborted before readAll() started");
+        }
+
         const mdFiles = await this.collectFiles();
 
         if (mdFiles.length === 0) {
@@ -24,82 +128,156 @@ export class LocalMdReader {
             return;
         }
 
-        console.log(`[LocalMdReader] found ${mdFiles.length} file(s), workers: ${this.workerCount}`);
+        console.log(
+            `[LocalMdReader] found ${mdFiles.length} file(s), ` +
+            `workers: ${this.workerCount}, queueMaxSize: ${this.queueMaxSize}`
+        );
 
         yield* this.streamChunks(mdFiles);
     }
 
-
     private async collectFiles(): Promise<string[]> {
-        const entries = await fs.readdir(this.dirPath, { withFileTypes: true });
-        return entries
-            .filter(e => e.isFile() && e.name.endsWith(".md"))
-            .map(e => path.join(this.dirPath, e.name));
+        const results: string[] = [];
+
+        const walk = async (dir: string): Promise<void> => {
+            let entries;
+            try {
+                entries = await fs.readdir(dir, { withFileTypes: true });
+            } catch (err) {
+                console.error(`[LocalMdReader] cannot read directory "${dir}":`, err);
+                return;
+            }
+
+            await Promise.all(
+                entries.map(async entry => {
+                    const full = path.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        await walk(full);
+                    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+                        results.push(full);
+                    }
+                })
+            );
+        };
+
+        await walk(this.dirPath);
+        return results.sort();
     }
 
-
     private async *streamChunks(mdFiles: string[]): AsyncGenerator<Chunk> {
-        const fileQueue = [...mdFiles];
-        const chunkQueue: Chunk[] = [];
-        let done = false;
-        let notify: (() => void) | null = null;
-        const wake = () => {
-            const n = notify;
-            notify = null;
-            n?.();
+        const queue     = new AsyncQueue<Chunk>(this.queueMaxSize);
+        const fileQueue = new FileQueue(mdFiles);
+        let filesProcessed = 0;
+
+        const onFileDone = () => {
+            filesProcessed++;
+            this.onProgress?.(filesProcessed, fileQueue.total);
         };
 
-        const push = (chunk: Chunk) => {
-            chunkQueue.push(chunk);
-            wake();
-        };
+        const allDone = Promise.all(
+            Array.from({ length: this.workerCount }, () =>
+                this.worker(fileQueue, queue, onFileDone)
+            )
+        ).then(() => queue.close());
 
-        const workersPromise = Promise.all(
-            Array.from({ length: this.workerCount }, () => this.worker(fileQueue, push))
-        ).then(() => {
-            done = true;
-            wake();
-        });
-
-        while (!done || chunkQueue.length > 0) {
-            if (chunkQueue.length > 0) {
-                yield chunkQueue.shift()!;
-            } else if (!done) {
-                await new Promise<void>(r => { notify = r; });
+        while (true) {
+            if (this.signal?.aborted) {
+                queue.close();
+                throw new Error("readAll() cancelled via AbortSignal");
             }
+
+            const chunk = await queue.dequeue();
+            if (chunk === null) break;
+            yield chunk;
         }
 
-        await workersPromise;
+        await allDone;
     }
 
     private async worker(
-        fileQueue: string[],
-        push: (chunk: Chunk) => void
+        fileQueue: FileQueue,
+        queue: AsyncQueue<Chunk>,
+        onFileDone: () => void
     ): Promise<void> {
-        while (true) {
-            const filePath = fileQueue.shift();
-            if (!filePath) break;
+        // Kick off the first read immediately
+        let nextRead = this.startNextRead(fileQueue);
+
+        while (nextRead !== null) {
+            if (this.signal?.aborted || queue.closed) break;
+
+            const { filePath, contentPromise } = nextRead;
+            nextRead = this.startNextRead(fileQueue);
 
             try {
-                const content = await fs.readFile(filePath, "utf-8");
-                const tree = unified()
-                    .use(remarkParse)
-                    .use(remarkGfm)
-                    .parse(content);
-
-                let chunkCount = 0;
-                for (const chunk of this.buildChunks(tree, filePath)) {
-                    push(chunk);
-                    chunkCount++;
-                }
-
-                console.log(`[worker] "${path.basename(filePath)}" → ${chunkCount} chunks`);
-
+                const chunkCount = await this.parseAndPush(
+                    filePath,
+                    contentPromise,
+                    queue
+                );
+                console.log(
+                    `[worker] "${path.basename(filePath)}" → ${chunkCount} chunks`
+                );
             } catch (err) {
+                this._errors.push({ filePath, error: err });
                 console.error(`[worker] failed on "${filePath}":`, err);
+            } finally {
+                onFileDone();
             }
         }
     }
+
+    private startNextRead(
+        fileQueue: FileQueue
+    ): { filePath: string; contentPromise: Promise<string> } | null {
+        const filePath = fileQueue.next();
+        if (!filePath) return null;
+        return {
+            filePath,
+            contentPromise: this.readWithTimeout(filePath),
+        };
+    }
+
+    private async parseAndPush(
+        filePath: string,
+        contentPromise: Promise<string>,
+        queue: AsyncQueue<Chunk>
+    ): Promise<number> {
+        const content = await contentPromise;
+
+        const tree = unified()
+            .use(remarkParse)
+            .use(remarkGfm)
+            .parse(content);
+
+        let chunkCount = 0;
+
+        for (const chunk of this.buildChunks(tree, filePath)) {
+            if (this.signal?.aborted || queue.closed) break;
+            await queue.enqueue(chunk);   // may park if queue is full (backpressure)
+            chunkCount++;
+        }
+
+        return chunkCount;
+    }
+
+
+    private readWithTimeout(filePath: string): Promise<string> {
+        const readPromise = fs.readFile(filePath, "utf-8");
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+            const id = setTimeout(
+                () => reject(new Error(
+                    `Read timeout after ${this.readTimeoutMs}ms: "${filePath}"`
+                )),
+                this.readTimeoutMs
+            );
+            // If the read finishes first, clear the timer so Node can exit cleanly
+            readPromise.then(() => clearTimeout(id), () => clearTimeout(id));
+        });
+
+        return Promise.race([readPromise, timeoutPromise]);
+    }
+
 
     private *buildChunks(tree: any, sourceFile: string): Generator<Chunk> {
         let current: Chunk = this.emptyChunk(sourceFile);
@@ -117,23 +295,20 @@ export class LocalMdReader {
                     break;
                 }
 
-                case "paragraph": {
+                case "paragraph":
                     current.content += this.extractNode(node) + "\n";
                     break;
-                }
 
-                case "code": {
+                case "code":
                     current.codeBlocks.push({
                         lang: node.lang || "",
                         value: node.value,
                     });
                     break;
-                }
 
-                case "list": {
+                case "list":
                     current.content += this.extractList(node) + "\n";
                     break;
-                }
 
                 case "table": {
                     const parsed = this.extractTable(node);
@@ -152,10 +327,9 @@ export class LocalMdReader {
                     break;
                 }
 
-                case "html": {
+                case "html":
                     current.content += node.value.replace(/<[^>]+>/g, "").trim() + "\n";
                     break;
-                }
 
                 case "thematicBreak": {
                     const flushed = this.flush(current);
@@ -179,11 +353,22 @@ export class LocalMdReader {
     }
 
     private emptyChunk(sourceFile: string): Chunk {
-        return { heading: "", level: 0, content: "", codeBlocks: [], tables: [], sourceFile };
+        return {
+            heading: "",
+            level: 0,
+            content: "",
+            codeBlocks: [],
+            tables: [],
+            sourceFile,
+        };
     }
 
     private flush(current: Chunk): Chunk | null {
-        if (current.content.trim() || current.codeBlocks.length > 0 || current.tables.length > 0) {
+        if (
+            current.content.trim() ||
+            current.codeBlocks.length > 0 ||
+            current.tables.length > 0
+        ) {
             return { ...current };
         }
         return null;
@@ -230,4 +415,3 @@ export class LocalMdReader {
         return result;
     }
 }
-

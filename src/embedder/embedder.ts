@@ -74,7 +74,7 @@ async function ingest(docsDir: string): Promise<void> {
         throw new Error("Set OPENAI_API_KEY environment variable before running");
     }
 
-    const reader = new LocalMdReader(docsDir, 4);
+    const reader = new LocalMdReader(docsDir);
     const embedder = new Embedder(OPENAI_API_KEY);
     const db = new QDrant_Db({
         url: QDRANT_URL,
@@ -155,24 +155,3 @@ async function search(query: string): Promise<void> {
     console.log("\n── Search results ──────────────────────────────");
     console.log(context);
 }
-
-// ─── Entry point ──────────────────────────────────────────────────────────────
-
-async function main() {
-    const command = process.argv[2];
-    const arg = process.argv[3];
-
-    if (command === "ingest") {
-        await ingest(arg ?? DOCS_DIR);
-
-    } else if (command === "search") {
-        if (!arg) throw new Error("Usage: npm run dev search <query>");
-        await search(arg);
-
-    } else {
-        // default: just ingest
-        await ingest(DOCS_DIR);
-    }
-}
-
-main().catch(console.error);
